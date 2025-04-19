@@ -1,140 +1,226 @@
-import streamlit as st
 import pandas as pd
+import streamlit as st
+from datetime import datetime, timedelta
+import plotly.graph_objects as go
 
-st.title("Vehicle Allocation Scheduler")
+st.set_page_config(layout="wide")
 
-# File uploader
-uploaded_file = st.file_uploader("Upload raw Excel file", type=["xlsx"])
+def validate_columns(df, required_cols, file_label):
+    for col in required_cols:
+        if col not in df.columns:
+            st.error(f"{file_label}: Could not find column '{col}'")
+            return False
+    return True
 
-if uploaded_file:
-    # Step 1: CLEANING
-    raw_df = pd.read_excel(uploaded_file)
+REQUIRED_TRIP_COLUMNS = ['Booking Id',
+ 'Booking Date',
+ 'Region',
+ 'City Name',
+ 'Source State',
+ 'Route',
+ 'To City',
+ 'Destination',
+ 'Source State 2',
+ 'Total Amount',
+ 'PrePaid/Advances',
+ 'PrePaid/PostPaid',
+ 'Start Date (DD-MMM-YYYY)',
+ 'End Date (DD-MMM-YYYY)',
+ 'Pickup Time',
+ 'Customer Name',
+ 'Trip Type',
+ 'Car Type']
+REQUIRED_CONFIG_COLUMNS = ["Route Group", "Duration", "Break Time", "Max Trips"]
 
-    # Ensure Pickup Time is clean
-    raw_df["Pickup Time"] = raw_df["Pickup Time"].astype(str).str.strip()
+# File uploaders
+uploaded_trip_file = st.file_uploader("Upload trip data Excel file", type=["xlsx"])
+uploaded_config_file = st.file_uploader("Upload route config Excel file", type=["xlsx"])
 
-    # Combine Start Date and Pickup Time into datetime
-    raw_df["pickup_datetime"] = pd.to_datetime(
-        raw_df["Start Date (DD-MMM-YYYY)"].dt.strftime('%Y-%m-%d') + " " + raw_df["Pickup Time"],
-        format='%Y-%m-%d %H:%M:%S',
-        errors='coerce'
-    )
+if uploaded_trip_file and uploaded_config_file:
+    # Load input files
+    trip_df = pd.read_excel(uploaded_trip_file)
+    config_df = pd.read_excel(uploaded_config_file)
 
-    # Car type mapping
-    car_type_map = {
-        "AC Mid-Size Plus(Toyota Etios or Equivalent)": "sedan",
-        "AC Economy(Wagon R or Equivalent)": "hatchback",
-        "Toyota Innova Crysta(Toyota Innova Crysta)": "SUV",
-        "AC SUV Large(Ertiga or Equivalent)": "SUV",
-        "AC Minivan(Toyota Innova)": "SUV"
-    }
+    valid_trip = validate_columns(trip_df, REQUIRED_TRIP_COLUMNS, "Trip File")
+    valid_config = validate_columns(config_df, REQUIRED_CONFIG_COLUMNS, "Route Config File")
 
-    raw_df["Car_Category"] = raw_df["Car Type"].map(car_type_map).fillna("unknown")
-    raw_df['Route'] = raw_df['Route'].replace('Katpadi-Chennai', 'Vellore-Chennai')
-    raw_df["Car_Category"] = raw_df["Car_Category"].replace("hatchback", "sedan")
+    if valid_trip and valid_config:
+        st.success("Files are valid! Processing...")
 
-    # Optional: Display cleaned data
-    st.subheader("Cleaned Data")
-    st.dataframe(raw_df)
+    # Step 1: Clean trip data 
+    def clean_trip_data(raw_df):
+        # Strip and unify pickup time
+        raw_df["Pickup Time"] = raw_df["Pickup Time"].astype(str).str.strip()
 
-    # Step 2: VEHICLE ALLOCATION LOGIC
-    # Use a different variable name for clarity
-    cleaned_df = raw_df.copy()
+        # Ensure Start Date is datetime
+        raw_df["Start Date (DD-MMM-YYYY)"] = pd.to_datetime(
+            raw_df["Start Date (DD-MMM-YYYY)"], errors="coerce"
+        )
 
-    # Add Route Group column
-    def get_bidirectional_route(route):
-        if "Bangalore" in route and "Chennai" in route:
-            return "Chennai ↔ Bangalore"
-        elif "Vellore" in route and "Chennai" in route:
-            return "Chennai ↔ Vellore"
-        else:
-            return "Other"
+        # Combine Start Date and Pickup Time into a single datetime column
+        raw_df["pickup_datetime"] = pd.to_datetime(
+            raw_df["Start Date (DD-MMM-YYYY)"].dt.strftime('%Y-%m-%d') + " " + raw_df["Pickup Time"],
+            format='%Y-%m-%d %H:%M:%S',
+            errors='coerce'
+        )
 
-    cleaned_df["Route Group"] = cleaned_df["Route"].apply(get_bidirectional_route)
-
-    # Show basic info
-    st.subheader("Route Groups")
-    st.dataframe(cleaned_df[["Route", "Route Group"]].drop_duplicates())
-
-    # Continue your vehicle allocation logic from here...
-    # Initialize session state if it's the first run
-    if "reset" not in st.session_state:
-        st.session_state.reset = False
-
-    def reset_filters():
-        st.session_state.selected_route_group = "All"
-        st.session_state.selected_vehicle_type = "All"
-        st.session_state.trip_duration = 5.0
-        st.session_state.break_time = 3.0
-        st.session_state.max_trips_vc = 3
-        st.session_state.max_trips_cv = 3
-        st.session_state.max_trips_bc = 20
-        st.session_state.max_trips_cb = 20
-
-    # Sidebar Filters
-    st.sidebar.header("Filter Options")
-
-    # Reset button
-    if st.sidebar.button("🔄 Reset All Filters"):
-        reset_filters()
-
-    route_group_options = ["All"] + sorted(cleaned_df["Route Group"].unique())
-    vehicle_type_options = ["All"] + sorted(cleaned_df["Car_Category"].unique())
-
-    # Route Group Filter
-    selected_route_group = st.sidebar.selectbox(
-        "Select Route Group", route_group_options,
-        index=route_group_options.index(st.session_state.get("selected_route_group", "All")),
-        key="selected_route_group"
-    )
-
-    # Vehicle Type Filter
-    selected_vehicle_type = st.sidebar.selectbox(
-        "Select Vehicle Type", vehicle_type_options,
-        index=vehicle_type_options.index(st.session_state.get("selected_vehicle_type", "All")),
-        key="selected_vehicle_type"
-    )
-
-    # Duration and Break Time Filters
-    # Only update session state if the value is not already set
-    trip_duration = st.sidebar.slider(
-        "Trip Duration (hrs)", 1.0, 24.0,
-        value=st.session_state.get("trip_duration", 5.0),
-        step=0.5, key="trip_duration"
-    )
-
-    break_time = st.sidebar.slider(
-        "Break Time after Trip (hrs)", 0.0, 24.0,
-        value=st.session_state.get("break_time", 3.0),
-        step=0.5, key="break_time"
-    )
-
-    # Max Trips Filters (1 to 30)
-    st.sidebar.markdown("### Set Max Trips per Vehicle per Day")
-    max_trips_vc = st.sidebar.slider("Vellore → Chennai", 1, 10, st.session_state.get("max_trips_vc", 3), key="max_trips_vc")
-    max_trips_cv = st.sidebar.slider("Chennai → Vellore", 1, 10, st.session_state.get("max_trips_cv", 3), key="max_trips_cv")
-    max_trips_bc = st.sidebar.slider("Bangalore → Chennai", 1, 5, st.session_state.get("max_trips_bc", 5), key="max_trips_bc")
-    max_trips_cb = st.sidebar.slider("Chennai → Bangalore", 1, 5, st.session_state.get("max_trips_cb", 5), key="max_trips_cb")
-
-    # Apply filters
-    filtered_df = cleaned_df.copy()
-
-    if selected_route_group != "All":
-        filtered_df = filtered_df[filtered_df["Route Group"] == selected_route_group]
-
-    if selected_vehicle_type != "All":
-        filtered_df = filtered_df[filtered_df["Car_Category"] == selected_vehicle_type]
-
-    # Sort trips
-    df_sorted = filtered_df.sort_values(by=["Car_Category", "pickup_datetime"])
-
-    # Allocation function
-    def allocate_vehicles_per_category(trips):
-        route_config = {
-            "Chennai-Vellore": {"duration": 3.5, "break_time": 2, "max_trips": 3},
-            "Bangalore-Chennai": {"duration": 7, "break_time": 3, "max_trips": 2},
+        # Standardize car type categories
+        car_type_map = {
+            "AC Mid-Size Plus(Toyota Etios or Equivalent)": "sedan",
+            "AC Economy(Wagon R or Equivalent)": "hatchback",  # mapped below to sedan
+            "Toyota Innova Crysta(Toyota Innova Crysta)": "SUV",
+            "AC SUV Large(Ertiga or Equivalent)": "SUV",
+            "AC Minivan(Toyota Innova)": "SUV"
         }
 
+        raw_df["Car_Category"] = raw_df["Car Type"].map(car_type_map).fillna("unknown")
+
+        # Merge Katpadi into Vellore route name
+        raw_df['Route'] = raw_df['Route'].replace('Katpadi-Chennai', 'Vellore-Chennai')
+        
+        # Group hatchback into sedan (if needed for better availability)
+        raw_df["Car_Category"] = raw_df["Car_Category"].replace("hatchback", "sedan")
+        #raw_df["Car_Category"] = raw_df["Car_Category"].replace("SUV", "sedan")
+
+        # Trim whitespaces and standardize route formatting (optional)
+        raw_df["Route"] = raw_df["Route"].astype(str).str.strip()
+        raw_df["Route"] = raw_df["Route"].str.replace(r'\s*-\s*', '-', regex=True)  # remove spaces around dash
+
+        return raw_df
+
+    def clean_trip_data_sedan_only(raw_df):
+        # Strip and unify pickup time
+        raw_df["Pickup Time"] = raw_df["Pickup Time"].astype(str).str.strip()
+
+        # Ensure Start Date is datetime
+        raw_df["Start Date (DD-MMM-YYYY)"] = pd.to_datetime(
+            raw_df["Start Date (DD-MMM-YYYY)"], errors="coerce"
+        )
+
+        # Combine Start Date and Pickup Time into a single datetime column
+        raw_df["pickup_datetime"] = pd.to_datetime(
+            raw_df["Start Date (DD-MMM-YYYY)"].dt.strftime('%Y-%m-%d') + " " + raw_df["Pickup Time"],
+            format='%Y-%m-%d %H:%M:%S',
+            errors='coerce'
+        )
+
+        # Standardize car type categories
+        car_type_map = {
+            "AC Mid-Size Plus(Toyota Etios or Equivalent)": "sedan",
+            "AC Economy(Wagon R or Equivalent)": "hatchback",  # mapped below to sedan
+            "Toyota Innova Crysta(Toyota Innova Crysta)": "SUV",
+            "AC SUV Large(Ertiga or Equivalent)": "SUV",
+            "AC Minivan(Toyota Innova)": "SUV"
+        }
+
+        raw_df["Car_Category"] = raw_df["Car Type"].map(car_type_map).fillna("unknown")
+
+        # Merge Katpadi into Vellore route name
+        raw_df['Route'] = raw_df['Route'].replace('Katpadi-Chennai', 'Vellore-Chennai')
+        
+        # Group hatchback into sedan (if needed for better availability)
+        raw_df["Car_Category"] = raw_df["Car_Category"].replace("hatchback", "sedan")
+        raw_df["Car_Category"] = raw_df["Car_Category"].replace("SUV", "sedan")
+
+        # Trim whitespaces and standardize route formatting (optional)
+        raw_df["Route"] = raw_df["Route"].astype(str).str.strip()
+        raw_df["Route"] = raw_df["Route"].str.replace(r'\s*-\s*', '-', regex=True)  # remove spaces around dash
+
+        return raw_df
+
+    #st.subheader("🚗 Sedan-Only Allocation")
+    use_only_sedan = st.checkbox("✅ Use only Sedans (replace SUVs)")
+
+    if use_only_sedan:
+        cleaned_df = clean_trip_data_sedan_only(trip_df)
+    else:
+        cleaned_df = clean_trip_data(trip_df)
+
+    # Step 2: Dynamically extract Route Group
+    def extract_route_group(route):
+        try:
+            cities = [city.strip() for city in route.split("-")]
+            if len(cities) != 2:
+                return "Invalid Route"
+            return f"{' ↔ '.join(sorted(cities))}"
+        except:
+            return "Invalid Route"
+
+    cleaned_df["Route Group"] = cleaned_df["Route"].apply(extract_route_group)
+    cleaned_df_sorted = cleaned_df.sort_values(by=["Car_Category", "pickup_datetime"])
+
+    # Step 3: Build route config map from Excel
+    route_config_map = {}
+
+    for _, row in config_df.iterrows():
+        route_group = row["Route Group"]
+        cities = [city.strip() for city in route_group.split("-")]
+        if len(cities) != 2:
+            continue
+        city1, city2 = cities
+
+        # Add both directional mappings with normalized keys
+        for leg in [(city1, city2), (city2, city1)]:
+            key = "-".join(sorted([leg[0], leg[1]]))  # No extra spaces
+            route_config_map[key] = {
+                "duration": row["Duration"],
+                "break_time": row["Break Time"],
+                "max_trips": row["Max Trips"]
+            }
+
+
+    import streamlit as st
+
+    st.markdown("### 🚦 Route Configuration")
+
+    seen = set()  # To avoid duplicates like A-B and B-A
+    display_data = []
+
+    for route, config in route_config_map.items():
+        city1, city2 = [city.strip() for city in route.split("-")]
+        group_key = " ↔ ".join(sorted([city1, city2]))
+        
+        if group_key not in seen:
+            display_data.append({
+                "Route Group": group_key,
+                "Duration (hrs)": config['duration'],
+                "Break Time (hrs)": config['break_time'],
+                "Max Trips / Day": config['max_trips']
+            })
+            seen.add(group_key)
+
+    # Convert to DataFrame for display
+    config_display_df = pd.DataFrame(display_data)
+
+    # Show it in Streamlit
+    st.dataframe(config_display_df, use_container_width=True)
+  
+    st.subheader("Filters")
+
+    # Standardize 'Route Group' and 'Car_Category' in data
+    config_df['Route Group'] = config_df['Route Group'].astype(str).str.strip()
+    cleaned_df_sorted['Route Group'] = cleaned_df_sorted['Route Group'].astype(str).str.strip()
+    cleaned_df_sorted['Car_Category'] = cleaned_df_sorted['Car_Category'].astype(str).str.strip()
+
+    #Route Group dropdown
+    route_groups = ['All'] + sorted(cleaned_df_sorted['Route Group'].dropna().unique())
+    selected_group = st.selectbox("Select Route Group", route_groups)
+
+    #Vehicle Type dropdown
+    vehicle_types = ['All'] + sorted(cleaned_df_sorted['Car_Category'].dropna().unique())
+    selected_vehicle_type = st.selectbox("Select Vehicle Type", vehicle_types)
+
+    # Apply filters
+    filtered_df = cleaned_df_sorted.copy()
+
+    if selected_group != 'All':
+        filtered_df = filtered_df[filtered_df['Route Group'].str.strip() == selected_group.strip()]
+
+    if selected_vehicle_type != 'All':
+        filtered_df = filtered_df[filtered_df['Car_Category'].str.strip() == selected_vehicle_type.strip()]
+
+    # Step 5: Vehicle allocation using config
+    def allocate_vehicles_per_category(trips, route_config_map):
         vehicles = {}
         vehicle_assignments = []
         vehicle_counts = {'SUV': 0, 'hatchback': 0, 'sedan': 0}
@@ -151,7 +237,7 @@ if uploaded_file:
             # Normalize route (e.g., both "Chennai-Vellore" and "Vellore-Chennai" → "Chennai-Vellore")
             normalized_route = "-".join(sorted([source.strip(), destination.strip()]))
 
-            config = route_config.get(normalized_route, {"duration": 5, "break_time": 3, "max_trips": 3})
+            config = route_config_map.get(normalized_route, {"duration": 5, "break_time": 3, "max_trips": 3})
             duration = config["duration"]
             break_time = config["break_time"]
             max_trips = config["max_trips"]
@@ -172,7 +258,7 @@ if uploaded_file:
             for i in range(len(vehicles[car_category])):
                 available_time = vehicles[car_category][i]
                 vehicle_loc = vehicle_locations[car_category][i]
-                vehicle_id = i + 1  # i-th vehicle always has ID i+1
+                vehicle_id = i + 1
                 count_for_date = trip_counts[car_category].get(vehicle_id, {}).get(trip_date, 0)
 
                 if available_time <= pickup_time and count_for_date < max_trips and vehicle_loc == source:
@@ -202,7 +288,7 @@ if uploaded_file:
                 return_time = pickup_time + pd.Timedelta(hours=duration + break_time)
                 vehicles[car_category].append(return_time)
                 vehicle_locations[car_category].append(destination)
-                new_vehicle_id = len(vehicles[car_category])  # Always assigned sequentially
+                new_vehicle_id = len(vehicles[car_category])
                 trip_counts[car_category].setdefault(new_vehicle_id, {})
                 trip_counts[car_category][new_vehicle_id][trip_date] = 1
 
@@ -224,138 +310,78 @@ if uploaded_file:
         trips["vehicle_id"] = vehicle_assignments
         trips["next_available_time"] = next_available_times
         trips["start_point"] = start_points
-
+        
         return trips, vehicle_counts, vehicle_schedule
 
 
+    allocation_df, vehicle_counts, vehicle_schedule = allocate_vehicles_per_category(filtered_df, route_config_map)
 
+    # Display vehicle count
+    st.subheader("Vehicle Assignment Summary")
+    for category, count in vehicle_counts.items():
+        st.write(f"**{category}**: {count} vehicles")
 
-    # Allocation
-    if not df_sorted.empty:
-        allocated_trips, vehicle_counts, vehicle_schedule = allocate_vehicles_per_category(df_sorted)
+    total_vehicles = sum(vehicle_counts.values())
+    st.write(f"### 🚗 Total Vehicles Needed: {total_vehicles}")
+    
 
-        st.subheader("Vehicle Assignment Summary")
-        for category, count in vehicle_counts.items():
-            st.write(f"**{category}**: {count} vehicles")
+    # Display
+    st.subheader("Cleaned Trip Data")
+    st.dataframe(cleaned_df)
 
-        total_vehicles = sum(vehicle_counts.values())
-        st.write(f"### 🚗 Total Vehicles Needed: {total_vehicles}")
+    st.subheader("Vehicle Allocation")
+    st.dataframe(allocation_df)
 
-        # Optional: Show the table
-        with st.expander("See Trip-wise Allocation"):
-            st.dataframe(allocated_trips)
-    else:
-        st.warning("No trips match your current filter selections.")
+    def display_utilization():
+        # Count the number of trips per vehicle
+        vehicle_trip_count = allocation_df.groupby(['Car_Category', 'vehicle_id']).size().reset_index(name='trip_count')
 
-    if not allocated_trips.empty:
+        # Calculate the average trips per vehicle for each category
+        average_trips = vehicle_trip_count.groupby('Car_Category')['trip_count'].mean().reset_index(name='average_trips')
+
+        # Merge and calculate utilization difference
+        utilization_df = pd.merge(vehicle_trip_count, average_trips, on='Car_Category')
+        utilization_df['utilization_diff'] = utilization_df['trip_count'] - utilization_df['average_trips']
+
+        # Over- and under-utilized
+        over_utilized = utilization_df[utilization_df['utilization_diff'] > 0].sort_values(by='utilization_diff', ascending=False)
+        under_utilized = utilization_df[utilization_df['utilization_diff'] < 0].sort_values(by='utilization_diff', ascending=True)
+
+        # Display in Streamlit
+        st.subheader("Top Over-Utilized Vehicles")
+        st.dataframe(over_utilized[['Car_Category', 'vehicle_id', 'trip_count', 'utilization_diff']].head(10))
+
+        st.subheader("Top Under-Utilized Vehicles")
+        st.dataframe(under_utilized[['Car_Category', 'vehicle_id', 'trip_count', 'utilization_diff']].head(5))
+
+    #if st.button("Show Vehicle Utilization"):
+    st.button("Show Vehicle Utilization")
+    display_utilization()
         
-        def display_utilization():
-            # Count the number of trips per vehicle
-            vehicle_trip_count = allocated_trips.groupby(['Car_Category', 'vehicle_id']).size().reset_index(name='trip_count')
             
-            # Calculate the average trips per vehicle for each category
-            average_trips = vehicle_trip_count.groupby('Car_Category')['trip_count'].mean().reset_index(name='average_trips')
-
-            # Merge and calculate utilization difference
-            utilization_df = pd.merge(vehicle_trip_count, average_trips, on='Car_Category')
-            utilization_df['utilization_diff'] = utilization_df['trip_count'] - utilization_df['average_trips']
-            
-            # Find top over-utilized and under-utilized vehicles
-            over_utilized = utilization_df[utilization_df['utilization_diff'] > 0].sort_values(by='utilization_diff', ascending=False)
-            under_utilized = utilization_df[utilization_df['utilization_diff'] < 0].sort_values(by='utilization_diff', ascending=True)
-            
-            # Display results in Streamlit
-            st.subheader("Top Over-Utilized Vehicles")
-            st.dataframe(over_utilized[['Car_Category', 'vehicle_id', 'trip_count', 'utilization_diff']].head(3))
-
-            st.subheader("Top Under-Utilized Vehicles")
-            st.dataframe(under_utilized[['Car_Category', 'vehicle_id', 'trip_count', 'utilization_diff']].head(3))
-
-        if st.button("Show Vehicle Utilization"):
-            display_utilization()
-
-        def display_vehicle_schedule():
-            st.subheader("View Schedule of a Vehicle")
-
-            # Let user choose car category
-            selected_category = st.selectbox("Select Car Category", list(vehicle_schedule.keys()))
-
-            # Get list of vehicle IDs in selected category
-            vehicle_ids = sorted(set(entry["vehicle_id"] for entry in vehicle_schedule[selected_category]))
-            selected_vehicle_id = st.selectbox("Select Vehicle ID", vehicle_ids)
-
-            # Filter schedule for selected vehicle
-            schedule = [
-                entry for entry in vehicle_schedule[selected_category]
-                if entry["vehicle_id"] == selected_vehicle_id
-            ]
-
-            # Add Route info from original df
-            if schedule:
-                # Display total number of trips
-                st.write(f"🧾 Total Trips for {selected_category} {selected_vehicle_id} - {len(schedule)}")
-
-                # Convert schedule to DataFrame and sort by pickup_time
-                schedule_df = pd.DataFrame(schedule).sort_values(by="pickup_time")
-                booking_ids = schedule_df["trip"].tolist()
-
-                # Fetch corresponding route info from original df
-                route_info = df_sorted[df_sorted["Booking Id"].isin(booking_ids)][["Booking Id", "Route"]]
-
-                # Merge to include Route
-                schedule_df = pd.merge(schedule_df, route_info, left_on="trip", right_on="Booking Id", how="left")
-                schedule_df = schedule_df.drop(columns=["Booking Id"]).rename(columns={"trip": "Booking Id"})
-
-                st.dataframe(schedule_df)
-            else:
-                st.info("No trips found for this vehicle.")
-
-
-
-        # Call this in your Streamlit layout
-        display_vehicle_schedule()
-
-    #if st.button("View Vehicle Schedule"):
-    #   display_vehicle_schedule()
-
-    import plotly.graph_objects as go
-
     def plot_vehicle_utilization():
-        # Create dictionaries to hold the number of trips for each vehicle type
-        suv_trips = {}
-        hatchback_trips = {}
-        sedan_trips = {}
+        # Aggregate trips
+        trip_data = {'SUV': {}, 'hatchback': {}, 'sedan': {}}
 
-        # Loop through vehicle_schedule and aggregate the trips for each category
-        for category in vehicle_schedule.keys():
+        for category in vehicle_schedule:
             for entry in vehicle_schedule[category]:
-                vehicle_id = entry["vehicle_id"]
-                if category == "SUV":
-                    suv_trips[vehicle_id] = suv_trips.get(vehicle_id, 0) + 1
-                elif category == "hatchback":
-                    hatchback_trips[vehicle_id] = hatchback_trips.get(vehicle_id, 0) + 1
-                elif category == "sedan":
-                    sedan_trips[vehicle_id] = sedan_trips.get(vehicle_id, 0) + 1
+                vid = entry['vehicle_id']
+                trip_data.setdefault(category, {})
+                trip_data[category][vid] = trip_data[category].get(vid, 0) + 1
 
-        # Create lists for x-axis (vehicle ids) and y-axis (trip counts)
-        suv_vehicle_ids = list(suv_trips.keys())
-        suv_trip_counts = list(suv_trips.values())
-        
-        hatchback_vehicle_ids = list(hatchback_trips.keys())
-        hatchback_trip_counts = list(hatchback_trips.values())
-        
-        sedan_vehicle_ids = list(sedan_trips.keys())
-        sedan_trip_counts = list(sedan_trips.values())
-
-        # Create the Plotly graph
         fig = go.Figure()
 
-        # Add a curve for each category
-        fig.add_trace(go.Scatter(x=suv_vehicle_ids, y=suv_trip_counts, mode='lines+markers', name='SUV', line=dict(color='blue')))
-        fig.add_trace(go.Scatter(x=hatchback_vehicle_ids, y=hatchback_trip_counts, mode='lines+markers', name='Hatchback', line=dict(color='green')))
-        fig.add_trace(go.Scatter(x=sedan_vehicle_ids, y=sedan_trip_counts, mode='lines+markers', name='Sedan', line=dict(color='red')))
+        color_map = {'SUV': 'blue', 'hatchback': 'green', 'sedan': 'red'}
+        for category, vehicle_data in trip_data.items():
+            if vehicle_data:
+                fig.add_trace(go.Scatter(
+                    x=list(vehicle_data.keys()),
+                    y=list(vehicle_data.values()),
+                    mode='lines+markers',
+                    name=category,
+                    line=dict(color=color_map[category])
+                ))
 
-        # Update layout for clarity
         fig.update_layout(
             title="Vehicle Utilization",
             xaxis_title="Vehicle ID",
@@ -364,8 +390,37 @@ if uploaded_file:
             legend_title="Vehicle Type"
         )
 
-        # Display the graph
         st.plotly_chart(fig)
 
-    # Call the function to display the chart
     plot_vehicle_utilization()
+
+    def display_vehicle_schedule():
+        st.subheader("View Schedule of a Vehicle")
+
+        selected_category = st.selectbox("Select Car Category", list(vehicle_schedule.keys()))
+        vehicle_ids = sorted(set(entry["vehicle_id"] for entry in vehicle_schedule[selected_category]))
+        selected_vehicle_id = st.selectbox("Select Vehicle ID", vehicle_ids)
+
+        schedule = [
+            entry for entry in vehicle_schedule[selected_category]
+            if entry["vehicle_id"] == selected_vehicle_id
+        ]
+
+        if schedule:
+            st.write(f"🧾 Total Trips for {selected_category} {selected_vehicle_id} - {len(schedule)}")
+
+            schedule_df = pd.DataFrame(schedule).sort_values(by="pickup_time")
+            booking_ids = schedule_df["trip"].tolist()
+
+            route_info = allocation_df[allocation_df["Booking Id"].isin(booking_ids)][["Booking Id", "Route"]]
+            schedule_df = pd.merge(schedule_df, route_info, left_on="trip", right_on="Booking Id", how="left")
+            schedule_df = schedule_df.drop(columns=["Booking Id"]).rename(columns={"trip": "Booking Id"})
+
+            st.dataframe(schedule_df)
+        else:
+            st.info("No trips found for this vehicle.")
+
+    display_vehicle_schedule()
+
+else:
+    st.info("Please upload both the trip data and route config Excel files.")
